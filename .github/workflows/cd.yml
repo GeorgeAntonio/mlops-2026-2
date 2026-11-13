@@ -1,0 +1,101 @@
+name: CD
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag já publicada no GHCR (ex.: v1.0.0)'
+        required: true
+        type: string
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  APP_NAME: intent-clf
+  RESOURCE_GROUP: mlops-2026-2
+
+# Cada execução verifica a sua própria revisão antes de liberar a próxima.
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+    permissions:
+      contents: read
+
+  release:
+    needs: ci
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build e push com a versão
+        shell: bash
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker build --platform linux/amd64 -t "$IMAGE:$TAG" .
+          docker push "$IMAGE:$TAG"
+
+  deploy:
+    needs: release
+    if: ${{ !failure() && !cancelled() && (github.event_name == 'workflow_dispatch' || needs.release.result == 'success') }}
+    environment: production
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Login no Azure via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Atualizar imagem e versão no Container Apps
+        shell: bash
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Tag inválida (use vX.Y.Z)'; exit 1; }
+          az containerapp update --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$IMAGE:$TAG" --set-env-vars APP_VERSION="$TAG" --output none
+
+  verify:
+    needs: deploy
+    if: ${{ !failure() && !cancelled() && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      APP_URL: ${{ vars.APP_URL }}
+    steps:
+      - name: Verificar versão e predição na URL pública
+        shell: bash
+        run: |
+          URL="${APP_URL%/}"
+          [[ "$URL" == https://* ]] || { echo 'Configure a variável APP_URL com HTTPS'; exit 1; }
+          MSG='{"nome":"cd","text":"não entendi nada"}'
+          while (( SECONDS < 900 )); do
+            if curl -fsS --max-time 20 "$URL/" | python -c 'import json, os, sys; d=json.load(sys.stdin); sys.exit(not (d.get("status")=="ok" and d.get("version")==os.environ["TAG"]))' && \
+               code=$(curl -sS --max-time 60 -o prediction.json -w '%{http_code}' "$URL/predictions" -H 'Content-Type: application/json' -d "$MSG") &&
+               [[ "$code" == 200 ]] &&
+               jq -e --argjson msg "$MSG" '.message.text == $msg.text and (.["confusion-clf"].intent | type == "string") and (.["confusion-clf"].probs | objects | length > 0)' prediction.json >/dev/null; then
+              echo
+              echo "OK: $TAG no ar"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Falhou: $TAG não respondeu. Faça o rollback."
+          exit 1
