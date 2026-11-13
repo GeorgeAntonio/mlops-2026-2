@@ -1,0 +1,37 @@
+name: Treinar classificador de confusão
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: treino-confusion
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Instalar o ambiente do classificador
+        run: python -m pip install -r requirements.txt
+      - name: Treinar e registrar o artefato no W&B
+        env:
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          WANDB_PROJECT: ${{ secrets.WANDB_PROJECT }}
+        run: |
+          : "${WANDB_API_KEY:?Cadastre WANDB_API_KEY nos secrets do repositório}"
+          : "${WANDB_PROJECT:?Cadastre WANDB_PROJECT nos secrets do repositório}"
+          python src/modules/intent_classifier/intent_classifier.py train \
+            --config=dados_treinamento/confusion_config.yml \
+            --training_data=dados_treinamento/confusion_examples.yml \
+            --save_model=models/confusion/model.keras \
+            --wandb_project="$WANDB_PROJECT"
