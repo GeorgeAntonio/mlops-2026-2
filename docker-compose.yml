@@ -1,0 +1,21 @@
+name: mlops-2026-2
+
+services:
+
+  intent-clf:
+
+    container_name: mlops-container
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+    - "8000:8000"
+    environment:
+    - APP_VERSION=${APP_VERSION:-dev}
+    - WANDB_API_KEY=${WANDB_API_KEY}
+    - WANDB_PROJECT=${WANDB_PROJECT}
+    - WANDB_MODELS=${WANDB_MODELS}
+    - MONGO_URL=${MONGO_URL}
+    - MONGO_DB=${MONGO_DB:-intent_classifier}
+    - MONGO_PRED_COLLECTION=${MONGO_PRED_COLLECTION:-predictions}
+    restart: unless-stopped
